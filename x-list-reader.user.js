@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Xリスト強化 — リポスト振り分け＋既読ライン
 // @namespace    xlr.local
-// @version      8.11.1
+// @version      8.12.0
 // @updateURL    https://raw.githubusercontent.com/sitimi-lab/x-list-reader-dist/main/x-list-reader.meta.js
 // @downloadURL  https://raw.githubusercontent.com/sitimi-lab/x-list-reader-dist/main/x-list-reader.user.js
 // @description  X（旧Twitter）で、アカウントごとにリポストを振り分け、「ここまで読んだ」線から古い投稿をグレーアウトします
@@ -19,7 +19,7 @@
   if (window.top !== window.self) return;
   if (window.__xlrLoaded) return;
   window.__xlrLoaded = true;
-  var VERSION = '8.11.1';
+  var VERSION = '8.12.0';
 
   /* ================= 保存領域 ================= */
   var store = {
@@ -278,6 +278,10 @@
     '.xlr-faded > *{opacity:.42 !important;filter:grayscale(.8);}',
     '.xlr-faded2 > *{opacity:.24 !important;filter:grayscale(.9);}',
     '.xlr-line{box-shadow:inset 0 3px 0 0 ' + LINE + ' !important;}',
+    '.xlr-fallback-line{box-shadow:inset 0 3px 0 0 #1d9bf0 !important;}',
+    /* 説明は疑似要素にし、投稿のグレー表示で薄まらないようにする */
+    '.xlr-fallback-line::before{content:"既読の境目（元のポストが見つかりません）";',
+    'display:block;padding:7px 12px 4px;color:#1d9bf0;font:11px/1.5 ' + FONT + ';}',
     '@media (hover:hover) and (pointer:fine){',
       '.xlr-chip:hover{border-color:#8b98a5;color:#e7e9ea;}',
     '}',
@@ -503,7 +507,7 @@
   function prep(article) {
     var c = cellOf(article);
     if (!c) return null;
-    c.classList.remove('xlr-off', 'xlr-faded', 'xlr-faded2', 'xlr-line');
+    c.classList.remove('xlr-off', 'xlr-faded', 'xlr-faded2', 'xlr-line', 'xlr-fallback-line');
     delete c.dataset.xlrRepost;
     delete c.dataset.xlrId;
     if (!active) { clearChips(article); clearMarkBtn(article); return null; }
@@ -611,6 +615,12 @@
       } else unreadCount++;
       if (it.dip) it.cell.dataset.xlrDip = '1'; else delete it.cell.dataset.xlrDip;
       if (i === lineAt) it.cell.classList.add('xlr-line');
+    }
+    // 元の投稿がないときだけ「境目へ移動」と同じ代わりの位置に青い線を出す。
+    // 会話として上に表示されている場合は対象外。未描画と削除は断定できない。
+    if (markId && lineAt < 0 && !items.some(function (f) { return f && f.id === markId; })) {
+      var fallback = jumpState();
+      if (fallback && fallback.target) cellOf(fallback.target).classList.add('xlr-fallback-line');
     }
     updateStat(readCount, unreadCount);
     syncJumpBtn();
