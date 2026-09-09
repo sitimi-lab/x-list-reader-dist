@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Xリスト強化 — リポスト振り分け＋既読ライン
 // @namespace    xlr.local
-// @version      8.12.1
+// @version      8.12.2
 // @updateURL    https://raw.githubusercontent.com/sitimi-lab/x-list-reader-dist/main/x-list-reader.meta.js
 // @downloadURL  https://raw.githubusercontent.com/sitimi-lab/x-list-reader-dist/main/x-list-reader.user.js
 // @description  X（旧Twitter）で、アカウントごとにリポストを振り分け、「ここまで読んだ」線から古い投稿をグレーアウトします
@@ -19,7 +19,7 @@
   if (window.top !== window.self) return;
   if (window.__xlrLoaded) return;
   window.__xlrLoaded = true;
-  var VERSION = '8.12.1';
+  var VERSION = '8.12.2';
 
   /* ================= 保存領域 ================= */
   var store = {
@@ -540,7 +540,7 @@
     return { cell: c, rp: rp, id: id };
   }
 
-  var scanQueued = false;
+  var scanQueued = false, repostReadCache = {}, repostReadCacheMark = null;
   function scheduleScan() {
     if (scanQueued) return;
     scanQueued = true;
@@ -550,6 +550,11 @@
   function scan() {
     var list = articles(), n = list.length, i;
     var items = new Array(n), read = new Array(n), above = new Array(n);
+    // 境目を付け替えたら、前の境目で得たリポスト判定は使わない。
+    if (repostReadCacheMark !== markId) {
+      repostReadCache = {};
+      repostReadCacheMark = markId;
+    }
 
     for (i = 0; i < n; i++) items[i] = prep(list[i]);
 
@@ -600,9 +605,17 @@
     for (i = 0; i < n; i++) {
       if (above[i] !== null) { up = read[i]; continue; }   // 上にある投稿の既読状態
       if (read[i] !== null) continue;                      // 通常の投稿は自分のIDで判断済み
-      if (up === null) read[i] = (lo[i] === null) ? false : lo[i];
-      else if (lo[i] === null) read[i] = up;
-      else read[i] = (up && lo[i]);
+      // 仮想スクロールの画面端では、片側の通常ポストがまだ描画されていない。
+      // 片側だけで決めると、同じリポストがスクロール位置によって
+      // グレーになったり戻ったりするため、上下がそろうまで未読として残す。
+      if (up !== null && lo[i] !== null) {
+        read[i] = up && lo[i];
+        // 次の描画で片側が仮想スクロールの外へ消えても、同じリポストを
+        // 反対の状態へ戻さない。IDは元投稿のIDだが、同じ投稿の識別には使える。
+        if (items[i] && items[i].id) repostReadCache[items[i].id] = read[i];
+      } else if (items[i] && items[i].id && Object.prototype.hasOwnProperty.call(repostReadCache, items[i].id)) {
+        read[i] = repostReadCache[items[i].id];
+      } else read[i] = false;
     }
 
     // 線を引く場所を決める。位置が信用できない場所（引き上げられた表示）には引かない
