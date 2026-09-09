@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Xリスト強化 — リポスト振り分け＋既読ライン
 // @namespace    xlr.local
-// @version      8.13.0
+// @version      8.13.1
 // @updateURL    https://raw.githubusercontent.com/sitimi-lab/x-list-reader-dist/main/x-list-reader.meta.js
 // @downloadURL  https://raw.githubusercontent.com/sitimi-lab/x-list-reader-dist/main/x-list-reader.user.js
 // @description  X（旧Twitter）で、アカウントごとにリポストを振り分け、「ここまで読んだ」線から古い投稿をグレーアウトします
@@ -19,7 +19,7 @@
   if (window.top !== window.self) return;
   if (window.__xlrLoaded) return;
   window.__xlrLoaded = true;
-  var VERSION = '8.13.0';
+  var VERSION = '8.13.1';
 
   /* ================= 保存領域 ================= */
   var store = {
@@ -645,6 +645,14 @@
       }
       return true;
     }
+    function tailHasEvidence(from) {
+      // 仮想スクロールの描画末尾にある候補は、その直後に未読返信が
+      // 隠れている可能性がある。少なくとも次の表示対象まで確認してから確定する。
+      for (var j = from + 1; j < n; j++) {
+        if (items[j] && !items[j].cell.classList.contains('xlr-off')) return true;
+      }
+      return false;
+    }
     function reliableBoundary(it) {
       // xlrJumpDip は「境目へ移動」で会話返信を避けるための印であり、
       // 返信だけを基準ポストの代わりにしないため、代替の境目候補からは外す。
@@ -658,17 +666,20 @@
       if (items[i] && items[i].id === markId) markerHere = true;
       if (items[i] && !items[i].cell.classList.contains('xlr-off') && read[i] !== true) lastUnread = i;
     }
-    if (markerHere) lineState.seen = true;
+    if (markerHere) {
+      lineState.seen = true;
+      if (jumping) jumpSawMarker = true;
+    }
     // 未読の直後から末尾までがすべて既読で、その先頭に置ける通常投稿を探す。
     if (markId && cfg.readStyle !== 'hide' && lastUnread >= 0) {
       for (i = lastUnread + 1; i < n; i++) {
         if (exactMarkerBoundary(items[i]) || reliableBoundary(items[i])) { boundaryAt = i; break; }
       }
-      if (boundaryAt >= 0 && visibleReadTail(boundaryAt)) {
+      if (boundaryAt >= 0 && visibleReadTail(boundaryAt) && tailHasEvidence(boundaryAt)) {
         if (items[boundaryAt].id === markId) boundaryMode = 'orange';
         // 基準ポストが画面内に確認できる場合だけ紫にする。
         // 見つからない場合は、保存IDをはさむ証拠があるときだけ青（欠落）にする。
-        else if (markerHere) boundaryMode = 'purple';
+        else if (markerHere || (jumping && jumpSawMarker)) boundaryMode = 'purple';
         else {
           // 基準IDをはさむ通常投稿が両側にあるときだけ、削除・欠落として青線を出す。
           var upper = null;
@@ -1057,7 +1068,7 @@
   /* ================= 境目へ移動 ================= */
   // Xは画面の周辺しか描画しないため、境目が描画範囲の外にあることがある。
   // 少しずつスクロールし、追加読み込みを待ちながら境目線を探す
-  var jumping = false, jumpTimer = null;
+  var jumping = false, jumpTimer = null, jumpSawMarker = false;
 
   function jumpState() {
     var list = articles(), rows = [], i;
@@ -1104,6 +1115,7 @@
   function jumpToLine() {
     if (!markId) return;
     if (jumping) { endJump(); return; }   // もう一度押したら中止
+    jumpSawMarker = false;
     jumping = true;
     var btn = panel.querySelector('#xlr-jump');
     if (btn) btn.textContent = '探しています…';
