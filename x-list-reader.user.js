@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Xリスト強化 — リポスト振り分け＋既読ライン
 // @namespace    xlr.local
-// @version      8.12.2
+// @version      8.12.3
 // @updateURL    https://raw.githubusercontent.com/sitimi-lab/x-list-reader-dist/main/x-list-reader.meta.js
 // @downloadURL  https://raw.githubusercontent.com/sitimi-lab/x-list-reader-dist/main/x-list-reader.user.js
 // @description  X（旧Twitter）で、アカウントごとにリポストを振り分け、「ここまで読んだ」線から古い投稿をグレーアウトします
@@ -19,7 +19,7 @@
   if (window.top !== window.self) return;
   if (window.__xlrLoaded) return;
   window.__xlrLoaded = true;
-  var VERSION = '8.12.2';
+  var VERSION = '8.12.3';
 
   /* ================= 保存領域 ================= */
   var store = {
@@ -567,6 +567,14 @@
     for (i = 0; i < normals.length - 1; i++) {
       var cu = items[normals[i]].id, nx = items[normals[i + 1]].id;
       if (cmpId(cu, nx) >= 0) continue;                       // 下の投稿より新しい＝並びは正常
+      // 通常位置の投稿に返信が付いた場合も、会話内では古い順にIDが増える。
+      // ただし会話が終わった次の投稿は、会話先頭より古いIDへ戻る。この形は
+      // 引き上げ表示ではないので、会話先頭に付けたオレンジ線を消さない。
+      var end = i + 1;
+      while (end < normals.length - 1 &&
+             cmpId(items[normals[end]].id, items[normals[end + 1]].id) < 0) end++;
+      var after = end < normals.length - 1 ? items[normals[end + 1]].id : null;
+      if (after !== null && cmpId(after, cu) < 0) continue;
       var pv = i > 0 ? items[normals[i - 1]].id : null;
       if (pv === null || cmpId(pv, cu) > 0) items[normals[i]].dip = true;
     }
