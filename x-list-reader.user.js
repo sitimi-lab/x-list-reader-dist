@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Xリスト強化 — リポスト振り分け＋既読ライン
 // @namespace    xlr.local
-// @version      8.12.0
+// @version      8.12.1
 // @updateURL    https://raw.githubusercontent.com/sitimi-lab/x-list-reader-dist/main/x-list-reader.meta.js
 // @downloadURL  https://raw.githubusercontent.com/sitimi-lab/x-list-reader-dist/main/x-list-reader.user.js
 // @description  X（旧Twitter）で、アカウントごとにリポストを振り分け、「ここまで読んだ」線から古い投稿をグレーアウトします
@@ -19,7 +19,7 @@
   if (window.top !== window.self) return;
   if (window.__xlrLoaded) return;
   window.__xlrLoaded = true;
-  var VERSION = '8.12.0';
+  var VERSION = '8.12.1';
 
   /* ================= 保存領域 ================= */
   var store = {
@@ -510,6 +510,7 @@
     c.classList.remove('xlr-off', 'xlr-faded', 'xlr-faded2', 'xlr-line', 'xlr-fallback-line');
     delete c.dataset.xlrRepost;
     delete c.dataset.xlrId;
+    delete c.dataset.xlrJumpDip;
     if (!active) { clearChips(article); clearMarkBtn(article); return null; }
 
     var rp = isRepost(article);
@@ -563,6 +564,15 @@
       if (cmpId(cu, nx) >= 0) continue;                       // 下の投稿より新しい＝並びは正常
       var pv = i > 0 ? items[normals[i - 1]].id : null;
       if (pv === null || cmpId(pv, cu) > 0) items[normals[i]].dip = true;
+    }
+    // 会話は古い順に並んだまとまりごと上へ引き上げられる。線を置ける場所は従来どおり
+    // 会話の末尾に残す一方、「境目へ移動」の代わりの目印には会話全体を使わない。
+    for (i = 0; i < normals.length - 1; i++) {
+      var a = items[normals[i]], b = items[normals[i + 1]];
+      if (cmpId(a.id, b.id) < 0) {
+        a.cell.dataset.xlrJumpDip = '1';
+        b.cell.dataset.xlrJumpDip = '1';
+      }
     }
 
     for (i = 0; i < n; i++) {
@@ -984,7 +994,8 @@
       var row = rows[i], c = row.cell;
       if (c.classList.contains('xlr-line')) marked = row.el;
       // グレー表示は投稿時刻の判定。位置の目印にはリポストや引き上げ会話を使わない。
-      if (c.dataset.xlrRepost === '1' || c.dataset.xlrDip === '1' || !c.dataset.xlrId) continue;
+      if (c.dataset.xlrRepost === '1' || c.dataset.xlrDip === '1' ||
+          c.dataset.xlrJumpDip === '1' || !c.dataset.xlrId) continue;
       if (row.read) {
         anyRead = true;
         if (anyUnread && !boundary) boundary = row.el;
