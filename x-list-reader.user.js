@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Xリスト強化 — リポスト振り分け＋既読ライン
 // @namespace    xlr.local
-// @version      8.12.3
+// @version      8.13.0
 // @updateURL    https://raw.githubusercontent.com/sitimi-lab/x-list-reader-dist/main/x-list-reader.meta.js
 // @downloadURL  https://raw.githubusercontent.com/sitimi-lab/x-list-reader-dist/main/x-list-reader.user.js
 // @description  X（旧Twitter）で、アカウントごとにリポストを振り分け、「ここまで読んだ」線から古い投稿をグレーアウトします
@@ -19,7 +19,7 @@
   if (window.top !== window.self) return;
   if (window.__xlrLoaded) return;
   window.__xlrLoaded = true;
-  var VERSION = '8.12.3';
+  var VERSION = '8.13.0';
 
   /* ================= 保存領域 ================= */
   var store = {
@@ -278,7 +278,10 @@
     '.xlr-faded > *{opacity:.42 !important;filter:grayscale(.8);}',
     '.xlr-faded2 > *{opacity:.24 !important;filter:grayscale(.9);}',
     '.xlr-line{box-shadow:inset 0 3px 0 0 ' + LINE + ' !important;}',
+    '.xlr-relocated-line{box-shadow:inset 0 3px 0 0 #7856ff !important;}',
     '.xlr-fallback-line{box-shadow:inset 0 3px 0 0 #1d9bf0 !important;}',
+    '.xlr-relocated-line::before{content:"既読の境目（基準ポストとは別の位置）";',
+    'display:block;padding:7px 12px 4px;color:#7856ff;font:11px/1.5 ' + FONT + ';}',
     /* 説明は疑似要素にし、投稿のグレー表示で薄まらないようにする */
     '.xlr-fallback-line::before{content:"既読の境目（元のポストが見つかりません）";',
     'display:block;padding:7px 12px 4px;color:#1d9bf0;font:11px/1.5 ' + FONT + ';}',
@@ -507,7 +510,7 @@
   function prep(article) {
     var c = cellOf(article);
     if (!c) return null;
-    c.classList.remove('xlr-off', 'xlr-faded', 'xlr-faded2', 'xlr-line', 'xlr-fallback-line');
+    c.classList.remove('xlr-off', 'xlr-faded', 'xlr-faded2', 'xlr-line', 'xlr-relocated-line', 'xlr-fallback-line');
     delete c.dataset.xlrRepost;
     delete c.dataset.xlrId;
     delete c.dataset.xlrJumpDip;
@@ -541,6 +544,9 @@
   }
 
   var scanQueued = false, repostReadCache = {}, repostReadCacheMark = null;
+  // 仮想スクロールで確認済みの境目が画面から消えても、同じ投稿が戻ったときに
+  // 線の色と位置を保てるようにする。基準やページが変われば捨てる。
+  var lineState = { scope: null, mark: null, id: null, mode: '', seen: false };
   function scheduleScan() {
     if (scanQueued) return;
     scanQueued = true;
@@ -554,6 +560,9 @@
     if (repostReadCacheMark !== markId) {
       repostReadCache = {};
       repostReadCacheMark = markId;
+    }
+    if (lineState.scope !== scopeKey || lineState.mark !== markId) {
+      lineState = { scope: scopeKey, mark: markId, id: null, mode: '', seen: false };
     }
 
     for (i = 0; i < n; i++) items[i] = prep(list[i]);
@@ -626,12 +635,58 @@
       } else read[i] = false;
     }
 
-    // 線を引く場所を決める。位置が信用できない場所（引き上げられた表示）には引かない
-    var lineAt = -1;
-    if (markId) {
-      for (i = 0; i < n; i++) {
-        if (items[i] && items[i].id === markId && !items[i].dip) { lineAt = i; break; }
+    // 線は「基準ポスト」ではなく、画面内で確認できた連続既読範囲の先頭に出す。
+    // そのため、線より下に未読・判定不能の投稿を残さない。
+    var markerHere = false, lastUnread = -1, boundaryAt = -1, boundaryMode = '';
+    function visibleReadTail(from) {
+      for (var j = from; j < n; j++) {
+        if (!items[j] || items[j].cell.classList.contains('xlr-off')) continue;
+        if (read[j] !== true) return false;
       }
+      return true;
+    }
+    function reliableBoundary(it) {
+      // xlrJumpDip は「境目へ移動」で会話返信を避けるための印であり、
+      // 返信だけを基準ポストの代わりにしないため、代替の境目候補からは外す。
+      return !!(it && !it.rp && it.id && !it.dip && it.cell.dataset.xlrJumpDip !== '1');
+    }
+    function exactMarkerBoundary(it) {
+      // 保存した基準ポスト自身は、下がすべて既読なら会話中でもオレンジの境目にできる。
+      return !!(it && !it.rp && it.id === markId && !it.dip);
+    }
+    for (i = 0; i < n; i++) {
+      if (items[i] && items[i].id === markId) markerHere = true;
+      if (items[i] && !items[i].cell.classList.contains('xlr-off') && read[i] !== true) lastUnread = i;
+    }
+    if (markerHere) lineState.seen = true;
+    // 未読の直後から末尾までがすべて既読で、その先頭に置ける通常投稿を探す。
+    if (markId && cfg.readStyle !== 'hide' && lastUnread >= 0) {
+      for (i = lastUnread + 1; i < n; i++) {
+        if (exactMarkerBoundary(items[i]) || reliableBoundary(items[i])) { boundaryAt = i; break; }
+      }
+      if (boundaryAt >= 0 && visibleReadTail(boundaryAt)) {
+        if (items[boundaryAt].id === markId) boundaryMode = 'orange';
+        // 基準ポストが画面内に確認できる場合だけ紫にする。
+        // 見つからない場合は、保存IDをはさむ証拠があるときだけ青（欠落）にする。
+        else if (markerHere) boundaryMode = 'purple';
+        else {
+          // 基準IDをはさむ通常投稿が両側にあるときだけ、削除・欠落として青線を出す。
+          var upper = null;
+          for (i = boundaryAt - 1; i >= 0; i--) {
+            if (reliableBoundary(items[i]) && cmpId(items[i].id, markId) > 0) { upper = i; break; }
+          }
+          if (upper !== null && cmpId(items[boundaryAt].id, markId) < 0) boundaryMode = 'blue';
+        }
+      } else boundaryAt = -1;
+    }
+    if (boundaryAt >= 0 && boundaryMode) {
+      lineState.id = items[boundaryAt].id;
+      lineState.mode = boundaryMode;
+    } else if (lineState.id && cfg.readStyle !== 'hide') {
+      // 確認済みの線が画面内に戻ったときだけ表示を復元する。下に未読が見つかれば破棄する。
+      for (i = 0; i < n; i++) if (items[i] && items[i].id === lineState.id) break;
+      if (i < n && visibleReadTail(i)) { boundaryAt = i; boundaryMode = lineState.mode; }
+      else if (i < n) { lineState.id = null; lineState.mode = ''; }
     }
 
     var readCount = 0, unreadCount = 0;
@@ -645,13 +700,11 @@
         else it.cell.classList.add(fadeClass());
       } else unreadCount++;
       if (it.dip) it.cell.dataset.xlrDip = '1'; else delete it.cell.dataset.xlrDip;
-      if (i === lineAt) it.cell.classList.add('xlr-line');
-    }
-    // 元の投稿がないときだけ「境目へ移動」と同じ代わりの位置に青い線を出す。
-    // 会話として上に表示されている場合は対象外。未描画と削除は断定できない。
-    if (markId && lineAt < 0 && !items.some(function (f) { return f && f.id === markId; })) {
-      var fallback = jumpState();
-      if (fallback && fallback.target) cellOf(fallback.target).classList.add('xlr-fallback-line');
+      if (i === boundaryAt) {
+        if (boundaryMode === 'orange') it.cell.classList.add('xlr-line');
+        else if (boundaryMode === 'purple') it.cell.classList.add('xlr-relocated-line');
+        else if (boundaryMode === 'blue') it.cell.classList.add('xlr-fallback-line');
+      }
     }
     updateStat(readCount, unreadCount);
     syncJumpBtn();
@@ -979,7 +1032,12 @@
     else if (t.id === 'xlr-rs') cfg.readStyle = t.value;
     else if (t.id === 'xlr-chips') cfg.showChips = t.checked;
     else if (t.id === 'xlr-bottom') { cfg.bottomBar = t.value; scrollingDown = false; }
-    else if (t.id === 'xlr-autohome') { cfg.autoHomeTab = t.checked; autoTabKey = ''; }
+    else if (t.id === 'xlr-autohome') {
+      cfg.autoHomeTab = t.checked;
+      autoTabKey = '';
+      homeManualPath = '';                         // 設定を入れ直したら再度自動選択できる
+      homeAutoTarget = null;
+    }
     else if (t.id === 'xlr-autoprofile') { cfg.autoProfileAll = t.checked; autoTabKey = ''; }
     else if (t.id === 'xlr-manual') {
       var p = location.pathname, i = cfg.manualPages.indexOf(p);
@@ -1013,7 +1071,8 @@
     var marked = null, boundary = null, anyRead = false, anyUnread = false;
     for (i = 0; i < rows.length; i++) {
       var row = rows[i], c = row.cell;
-      if (c.classList.contains('xlr-line')) marked = row.el;
+      if (c.classList.contains('xlr-line') || c.classList.contains('xlr-relocated-line') ||
+          c.classList.contains('xlr-fallback-line')) marked = row.el;
       // グレー表示は投稿時刻の判定。位置の目印にはリポストや引き上げ会話を使わない。
       if (c.dataset.xlrRepost === '1' || c.dataset.xlrDip === '1' ||
           c.dataset.xlrJumpDip === '1' || !c.dataset.xlrId) continue;
@@ -1026,9 +1085,10 @@
         boundary = null;
       }
     }
-    // 線の投稿が削除された場合は、最後の未読より下の、位置が信用できる既読を使う。
+    // 実際に確認できた色付きの線だけを移動先にする。候補だけで止まると、
+    // 線より下に未読が残る曖昧な場所へ移動してしまう。
     return {
-      target: marked || boundary,
+      target: marked,
       allRead: anyRead && !anyUnread,
       progress: rows.map(function (r) { return r.cell.dataset.xlrId || ''; }).join(',')
     };
@@ -1091,6 +1151,9 @@
 
   /* ================= タブの自動選択 ================= */
   var autoTabKey = '', autoTabTries = 0, autoTabTimer = null;
+  // Xはタブ領域を描き直すことがある。自動選択した要素だけを覚え、
+  // その要素が消えた場合だけ選択を再確認する（利用者が選んだタブは触らない）。
+  var homeAutoTarget = null, homeManualPath = '';
 
   // こちらが自動で押したぶんは履歴に積まない。
   // 積むと「戻る」を何度も押さないと前のページへ帰れなくなる
@@ -1199,17 +1262,31 @@
 
   // 「フォロー中」のすぐ右のタブ（＝最初のリスト）を選ぶ
   function pickFirstListTab() {
-    var ts = tabEls();
+    var raw = tabEls(), ts = [], i;
+    for (i = 0; i < raw.length; i++) if (visible(raw[i])) ts.push(raw[i]);
     if (ts.length < 3) return false;
-    for (var i = 0; i < ts.length; i++) {
+    for (i = 0; i < ts.length; i++) {
       if (!/^(フォロー中|Following)$/.test(normText(ts[i].textContent))) continue;
       var next = ts[i + 1];
       if (!next) return false;
-      if (next.getAttribute('aria-selected') !== 'true') autoClick(next);
-      return true;
+      if (next.getAttribute('aria-selected') === 'true') { homeAutoTarget = next; return true; }
+      autoClick(next);
+      // clickがXの初期化より早く無視された場合もあるので、選択済みになるまで再試行する。
+      return false;
     }
     return false;
   }
+
+  // 利用者がホームのタブを自分で選んだ後は、そのページにいる間は戻さない。
+  document.addEventListener('click', function (e) {
+    if (!e.isTrusted) return;
+    var t = e.target && e.target.closest ? e.target.closest('[role="tab"]') : null;
+    if (t && /^\/(home)?\/?$/.test(location.pathname)) {
+      homeManualPath = location.pathname;
+      homeAutoTarget = null;
+      cancelAutoTab();
+    }
+  }, true);
 
   // 実際に画面に出ているかどうかを見る。
   // 非表示のままDOMに残っている選択肢を押すと、勝手に画面が切り替わってしまう
@@ -1303,11 +1380,18 @@
     var isProfile = !!(m && RESERVED.indexOf(m[1]) === -1);
     var want = (isHome && cfg.autoHomeTab) ? 'home' : (isProfile && cfg.autoProfileAll) ? 'profile' : '';
     if (!want) return;
+    if (want === 'home' && homeManualPath === p) return;
     if (Date.now() - backAt < 3000) return;        // 「戻る」直後は動かさない
     var who = want === 'profile' ? m[1] : '';
     if (who && autoDone[who]) return;              // 一度処理したプロフィールはやり直さない
     var key = want + ':' + p;
-    if (autoTabKey === key) return;                // 同じページで繰り返さない
+    if (autoTabKey === key) {
+      // 自動選択したタブだけがXの再描画で消えたなら、同じホームで再確認する。
+      if (want === 'home' && homeAutoTarget && !homeAutoTarget.isConnected) {
+        autoTabKey = '';
+        homeAutoTarget = null;
+      } else return;
+    }
     autoTabKey = key;
     autoTabTries = 0;
     menuTries = 0;
@@ -1318,7 +1402,7 @@
         if (who) autoDone[who] = true;
         return;
       }
-      if (++autoTabTries > 25) { if (who) autoDone[who] = true; return; }   // 10秒ほどで諦める
+      if (++autoTabTries > 75) { if (who) autoDone[who] = true; return; }   // 初期化の遅いXにも30秒ほど待つ
       autoTabTimer = setTimeout(tryOnce, 400);
     })();
   }
@@ -1346,9 +1430,13 @@
 
   function checkRoute() {
     var sc = scopeOf();
+    if (sc.path !== lastPath) {
+      autoTabKey = '';                           // ページを移ったらやり直す
+      homeAutoTarget = null;
+      if (!/^\/(home)?\/?$/.test(sc.path)) homeManualPath = '';
+    }
     scheduleAutoTab();
     if (sc.path === lastPath && sc.key === scopeKey) return;
-    if (sc.path !== lastPath) autoTabKey = '';   // ページを移ったらやり直す
     lastPath = sc.path;
     isList = sc.list;
     active = isList || cfg.manualPages.indexOf(sc.path) !== -1;
