@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Xリスト強化 — リポスト振り分け＋既読ライン
 // @namespace    xlr.local
-// @version      8.13.4
+// @version      8.14.0
 // @updateURL    https://raw.githubusercontent.com/sitimi-lab/x-list-reader-dist/main/x-list-reader.meta.js
 // @downloadURL  https://raw.githubusercontent.com/sitimi-lab/x-list-reader-dist/main/x-list-reader.user.js
 // @description  X（旧Twitter）で、アカウントごとにリポストを振り分け、「ここまで読んだ」線から古い投稿をグレーアウトします
@@ -19,7 +19,7 @@
   if (window.top !== window.self) return;
   if (window.__xlrLoaded) return;
   window.__xlrLoaded = true;
-  var VERSION = '8.13.4';
+  var VERSION = '8.14.0';
 
   /* ================= 保存領域 ================= */
   var store = {
@@ -34,7 +34,8 @@
     repostMode: 'rules',   // off / rules / all
     readStyle: 'dim',      // dim / dim2 / hide
     showChips: true,       // 未設定のリポストにだけ選択ボタンを出す
-    bottomBar: 'scroll',   // 下部バー: off / scroll（下スクロール中は隠す）/ always
+    bottomBar: 'scroll',   // 下部バー: off / scroll（上下スクロールで隠す）/ always
+    topBar: 'scroll',      // スマホの上部バー。戻るボタンは残す
     autoHomeTab: true,     // ホームを開いたら最初のリストタブへ
     autoProfileAll: true,  // プロフィールは「すべて」タブへ
     open: false,
@@ -104,7 +105,7 @@
 
   /* ================= 端末間の同期（GitHub Gist） ================= */
   var SYNC_KEY = 'xlr:sync', SYNC_FILE = 'x-list-reader.json';
-  var SYNC_CFG_KEYS = ['repostMode', 'readStyle', 'showChips', 'bottomBar', 'manualPages',
+  var SYNC_CFG_KEYS = ['repostMode', 'readStyle', 'showChips', 'bottomBar', 'topBar', 'manualPages',
                        'autoHomeTab', 'autoProfileAll'];
   var sync = Object.assign({ token: '', gist: '', last: 0 }, store.get(SYNC_KEY, {}));
   var syncMsg = '';
@@ -176,11 +177,13 @@
     var changed = false, i;
     if (remote && remote.cfg && (remote.cfg.t || 0) > (cfg.t || 0)) {
       var v = remote.cfg.value || {};
+      var oldTop = cfg.topBar, oldBottom = cfg.bottomBar;
       for (i = 0; i < SYNC_CFG_KEYS.length; i++) {
         var k = SYNC_CFG_KEYS[i];
         if (v[k] !== undefined) cfg[k] = v[k];
       }
       cfg.t = remote.cfg.t; saveCfg(); changed = true;
+      if (oldTop !== cfg.topBar || oldBottom !== cfg.bottomBar) resetBars();
     }
     var rr = (remote && remote.rules) || {};
     Object.keys(rr).forEach(function (k) {
@@ -292,7 +295,14 @@
     '@media (hover:hover) and (pointer:fine){',
       '.xlr-chip:hover{border-color:#8b98a5;color:#e7e9ea;}',
     '}',
-    '.xlr-hidebar{opacity:0 !important;pointer-events:none !important;transition:opacity .12s;}',
+    '.xlr-bar-managed{transition:opacity .12s;}',
+    '.xlr-bar-shown{opacity:1 !important;visibility:visible !important;transform:none !important;translate:none !important;}',
+    '.xlr-hidebar{opacity:0 !important;visibility:hidden !important;pointer-events:none !important;}',
+    '.xlr-hidebar *{visibility:hidden !important;pointer-events:none !important;}',
+    // 戻るボタンの祖先を透明化するとボタンも消えるため、上部には visibility を使う。
+    '.xlr-top-hidden,.xlr-top-hidden *{visibility:hidden !important;pointer-events:none !important;}',
+    '.xlr-top-hidden{background:transparent !important;backdrop-filter:none !important;}',
+    '.xlr-top-hidden .xlr-back-visible,.xlr-top-hidden .xlr-back-visible *{visibility:visible !important;pointer-events:auto !important;}',
     /* 下のバーが消えたぶん、右下の投稿ボタンと左下の起動ボタンを下げる */
     /* transform を使うとXのホバー演出と取り合いになって震えるので translate を使う */
     '.xlr-shiftdown{translate:0 var(--xlr-shift,53px) !important;}',
@@ -764,7 +774,121 @@
   }
 
   /* ================= Xのバーを隠す ================= */
-  var barCache = null, lastY = 0, scrollingDown = false;
+  var barCache = null, lastY = 0, barMotion = 0, barsHidden = false, barsRevealed = false;
+  var topCache = [], topDirty = true, topBacks = [];
+  var edgeY = -1, edgeMax = -1, edgeSince = 0, lastWheelAt = 0, barTouch = null;
+  var BACK_SELECTOR = '[data-testid="app-bar-back"],button[aria-label="戻る"],button[aria-label="Back"],'+
+    '[role="button"][aria-label="戻る"],[role="button"][aria-label="Back"]';
+  var BAR_EXCLUDE = 'article,[data-testid="cellInnerDiv"],[role="dialog"],[aria-modal="true"],'+
+    'input,textarea,[contenteditable="true"],#xlr-panel,#xlr-fab';
+
+  function barPosition() {
+    var max = Math.max(0, Math.max(document.body.scrollHeight, document.documentElement.scrollHeight) - window.innerHeight);
+    // Safariの端の跳ね返りはページ内の移動として数えない。
+    return { y: Math.max(0, Math.min(window.scrollY || 0, max)), max: max };
+  }
+
+  function resetBars() {
+    lastY = barPosition().y;
+    barMotion = 0; barsHidden = false; barsRevealed = false;
+    edgeSince = 0; edgeY = -1; edgeMax = -1; lastWheelAt = 0; barTouch = null;
+    topDirty = true;
+  }
+
+  function settledBottom() {
+    var p = barPosition(), now = Date.now();
+    if (p.max <= 60 || p.max - p.y > 4) {
+      edgeSince = 0; edgeY = p.y; edgeMax = p.max; return false;
+    }
+    if (!edgeSince || p.y !== edgeY || p.max !== edgeMax) edgeSince = now;
+    edgeY = p.y; edgeMax = p.max;
+    return now - edgeSince >= 300;
+  }
+
+  function revealBars(force) {
+    barsHidden = false; barsRevealed = !!force; barMotion = 0;
+    lastY = barPosition().y;
+    applyBars();
+  }
+
+  function pageScrollInput(target) {
+    if (!target || !target.closest || target.closest('#xlr-panel,input,textarea,select,[contenteditable="true"],[role="dialog"],[aria-modal="true"]')) return false;
+    var dialogs = document.querySelectorAll('[role="dialog"],[aria-modal="true"]');
+    for (var d = 0; d < dialogs.length; d++) if (visible(dialogs[d])) return false;
+    // パネルや横タブなど、ページ以外のスクロールを端への再操作に数えない。
+    for (var n = target; n && n !== document.body; n = n.parentElement) {
+      var cs = getComputedStyle(n);
+      if (/(auto|scroll)/.test(cs.overflowY) && n.scrollHeight > n.clientHeight + 4) return false;
+    }
+    return true;
+  }
+
+  function bindBarInput() {
+    window.addEventListener('wheel', function (e) {
+      var now = Date.now(), fresh = now - lastWheelAt >= 300;
+      lastWheelAt = now;
+      if (fresh && e.deltaY > 0 && Math.abs(e.deltaY) > Math.abs(e.deltaX) &&
+          pageScrollInput(e.target) && settledBottom()) revealBars();
+    }, { passive: true });
+    window.addEventListener('touchstart', function (e) {
+      barTouch = null;
+      if (e.touches.length !== 1 || !pageScrollInput(e.target)) return;
+      var t = e.touches[0];
+      barTouch = { id: t.identifier, x: t.clientX, y: t.clientY, ready: settledBottom() };
+    }, { passive: true });
+    window.addEventListener('touchmove', function (e) {
+      if (!barTouch || e.touches.length !== 1) { barTouch = null; return; }
+      var t = e.touches[0], dy = barTouch.y - t.clientY, dx = barTouch.x - t.clientX;
+      if (t.identifier !== barTouch.id || !settledBottom()) { barTouch = null; return; }
+      if (Math.abs(dx) > 4 && Math.abs(dx) >= Math.abs(dy)) { barTouch = null; return; }
+      if (barTouch.ready && dy > 4) { barTouch = null; revealBars(); }
+    }, { passive: true });
+    ['touchend', 'touchcancel'].forEach(function (name) {
+      window.addEventListener(name, function () { barTouch = null; }, { passive: true });
+    });
+  }
+
+  function clearTopBar(el) {
+    el.classList.remove('xlr-top-hidden', 'xlr-bar-shown', 'xlr-bar-managed');
+  }
+
+  function topBars() {
+    if (!topDirty) return topCache;
+    topDirty = false;
+    var found = [];
+    // 主列・バナー内の意味が分かる部品を起点に、小さい固定領域だけを探す。
+    var roots = document.querySelectorAll('[data-testid="primaryColumn"],header[role="banner"],[role="banner"]');
+    for (var i = 0; i < roots.length; i++) {
+      var root = roots[i];
+      var seeds = root.querySelectorAll('h1,h2,[role="heading"],[role="tablist"],'+
+        '[data-testid="SideNav_AccountSwitcher_Button"],' + BACK_SELECTOR);
+      for (var j = 0; j < seeds.length; j++) {
+        if (seeds[j].closest(BAR_EXCLUDE)) continue;
+        for (var n = seeds[j]; n && root.contains(n); n = n.parentElement) {
+          var cs = getComputedStyle(n), r = n.getBoundingClientRect(), top = parseFloat(cs.top);
+          if ((cs.position === 'sticky' || cs.position === 'fixed') && top >= 0 && top <= 60 &&
+              r.width >= window.innerWidth * 0.7 && r.height >= 20 && r.height <= 180 &&
+              !n.querySelector(BAR_EXCLUDE)) {
+            if (found.indexOf(n) === -1) found.push(n);
+            break;
+          }
+          if (n === root) break;
+        }
+      }
+    }
+    // 入れ子の領域は親にまとめ、戻るボタンの表示指定が互いに干渉しないようにする。
+    found = found.filter(function (el) { return !found.some(function (other) { return other !== el && other.contains(el); }); });
+    topCache.forEach(function (el) { if (found.indexOf(el) === -1) clearTopBar(el); });
+    topBacks.forEach(function (el) { el.classList.remove('xlr-back-visible'); });
+    topBacks = [];
+    found.forEach(function (el) {
+      el.querySelectorAll(BACK_SELECTOR).forEach(function (back) {
+        if (!back.closest(BAR_EXCLUDE)) { back.classList.add('xlr-back-visible'); topBacks.push(back); }
+      });
+    });
+    topCache = found;
+    return found;
+  }
 
   function bottomBar() {
     if (barCache && barCache.isConnected) return barCache;
@@ -835,6 +959,14 @@
   }
 
   function applyBars() {
+    settledBottom();
+    var mobile = window.innerWidth <= 700;
+    topBars().forEach(function (el) {
+      if (!mobile || cfg.topBar === 'off') { clearTopBar(el); return; }
+      var hide = !barsRevealed && (cfg.topBar === 'always' || (cfg.topBar === 'scroll' && barsHidden));
+      el.classList.add('xlr-bar-managed', 'xlr-bar-shown');
+      el.classList.toggle('xlr-top-hidden', hide);
+    });
     var bar = bottomBar();
     if (!bar) { setShift(false); return; }
 
@@ -844,14 +976,13 @@
     try { h = Math.round(bar.getBoundingClientRect().height); } catch (e) {}
     if (h > 20 && h < 130) document.documentElement.style.setProperty('--xlr-shift', h + 'px');
 
-    var wantOff = cfg.bottomBar === 'always';
-    var wantFade = !wantOff && cfg.bottomBar === 'scroll' && scrollingDown;
+    var wantFade = !barsRevealed && (cfg.bottomBar === 'always' || (cfg.bottomBar === 'scroll' && barsHidden));
     // 下のバーはスマホ幅のときだけ存在する。PCで下げるとボタンが画面外に出てしまう
-    var mobile = window.innerWidth <= 700;
     // 変化があるときだけ書き換える。毎回付け直すと状態が安定しない
-    if (bar.classList.contains('xlr-off') !== wantOff) bar.classList.toggle('xlr-off', wantOff);
+    bar.classList.toggle('xlr-bar-managed', cfg.bottomBar !== 'off');
+    bar.classList.toggle('xlr-bar-shown', cfg.bottomBar !== 'off' && !wantFade);
     if (bar.classList.contains('xlr-hidebar') !== wantFade) bar.classList.toggle('xlr-hidebar', wantFade);
-    setShift(mobile && (wantOff || wantFade));
+    setShift(mobile && wantFade);
   }
 
   /* ================= UI ================= */
@@ -893,12 +1024,19 @@
       '</div>' +
     '</div>' +
     '<div class="xlr-sec">' +
+      '<div class="xlr-row"><span>上のバー（スマホ）</span>' +
+        '<select id="xlr-top" aria-label="上のバー（スマホ）">' +
+          '<option value="off">そのまま</option>' +
+          '<option value="scroll">スクロール中は隠す</option>' +
+          '<option value="always">常に隠す</option>' +
+        '</select></div>' +
       '<div class="xlr-row"><span>下のバー</span>' +
         '<select id="xlr-bottom">' +
           '<option value="off">そのまま</option>' +
           '<option value="scroll">スクロール中は隠す</option>' +
           '<option value="always">常に隠す</option>' +
         '</select></div>' +
+      '<div class="xlr-btns"><button id="xlr-show-bars" class="sub">上下のバーを表示</button></div>' +
     '</div>' +
     '<label class="xlr-sec" id="xlr-manualwrap"><input type="checkbox" id="xlr-manual"><span>このページにも適用</span></label>' +
     '<div class="xlr-sec">' +
@@ -974,6 +1112,7 @@
     panel.querySelector('#xlr-rs').value = cfg.readStyle;
     panel.querySelector('#xlr-chips').checked = cfg.showChips;
     panel.querySelector('#xlr-bottom').value = cfg.bottomBar;
+    panel.querySelector('#xlr-top').value = cfg.topBar;
     panel.querySelector('#xlr-autohome').checked = cfg.autoHomeTab;
     panel.querySelector('#xlr-autoprofile').checked = cfg.autoProfileAll;
     panel.querySelector('#xlr-rwrap').style.display = cfg.repostMode === 'off' ? 'none' : '';
@@ -1030,6 +1169,11 @@
 
   panel.addEventListener('click', function (e) {
     var t = e.target;
+    if (t.id === 'xlr-show-bars') {
+      panel.hidden = true; cfg.open = false; saveCfg();
+      fab.focus({ preventScroll: true });
+      revealBars(true); return;
+    }
     if (t.dataset && t.dataset.xlrClear) {
       var k = t.dataset.xlrClear;
       undoState = { key: k, prev: Object.assign({}, rules[k]) };
@@ -1083,7 +1227,8 @@
     if (t.id === 'xlr-mode') cfg.repostMode = t.value;
     else if (t.id === 'xlr-rs') cfg.readStyle = t.value;
     else if (t.id === 'xlr-chips') cfg.showChips = t.checked;
-    else if (t.id === 'xlr-bottom') { cfg.bottomBar = t.value; scrollingDown = false; }
+    else if (t.id === 'xlr-bottom') { cfg.bottomBar = t.value; resetBars(); }
+    else if (t.id === 'xlr-top') { cfg.topBar = t.value; resetBars(); }
     else if (t.id === 'xlr-autohome') {
       cfg.autoHomeTab = t.checked;
       autoTabKey = '';
@@ -1513,6 +1658,7 @@
     }
     scheduleAutoTab();
     if (sc.path === lastPath && sc.key === scopeKey) return;
+    resetBars();
     lastPath = sc.path;
     isList = sc.list;
     active = isList || cfg.manualPages.indexOf(sc.path) !== -1;
@@ -1530,23 +1676,33 @@
     panel.hidden = !cfg.open;
 
     new MutationObserver(function () {
+      topDirty = true;
       if (!fab.isConnected) document.body.appendChild(fab);
       if (!panel.isConnected) document.body.appendChild(panel);
       checkRoute(); scheduleScan();
     }).observe(document.documentElement, { childList: true, subtree: true });
 
     var ticking = false;
-    lastY = window.scrollY || 0;
+    resetBars();
+    bindBarInput();
+    window.addEventListener('resize', function () { topDirty = true; barTouch = null; applyBars(); }, { passive: true });
     window.addEventListener('scroll', function () {
-      var y = window.scrollY || 0;
-      if (Math.abs(y - lastY) > 4) { scrollingDown = y > lastY && y > 60; lastY = y; }
-      if (y <= 60) scrollingDown = false;
+      var y = barPosition().y;
+      if (y !== lastY) {
+        barsRevealed = false;
+        barMotion += Math.abs(y - lastY);
+        if (barMotion > 4) { barsHidden = true; barMotion = 0; }
+        lastY = y;
+      }
+      if (y <= 60) { barsHidden = false; barMotion = 0; }
+      settledBottom();
       if (ticking) return;
       ticking = true;
       requestAnimationFrame(function () { ticking = false; applyBars(); scheduleScan(); });
     }, { passive: true });
 
-    setInterval(function () { checkRoute(); applyBars(); scheduleScan(); }, 1500);
+    // Xが属性だけで固定配置を切り替えた場合も再判定する。
+    setInterval(function () { checkRoute(); topDirty = true; applyBars(); scheduleScan(); }, 1500);
 
     // 起動時と、一定間隔・画面復帰時に取りに行く
     if (connected()) setTimeout(function () { syncNow(); }, 1200);
