@@ -1,7 +1,7 @@
 # Xリスト強化 — リポスト振り分け＋既読ライン
 
 PC ChromeのTampermonkeyと、iPhone SafariのUserscripts向けの配布用リポジトリです。
-現在のバージョン: **8.13.2**
+現在のバージョン: **8.13.3**
 
 ## 初回インストール
 

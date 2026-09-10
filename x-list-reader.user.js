@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Xリスト強化 — リポスト振り分け＋既読ライン
 // @namespace    xlr.local
-// @version      8.13.2
+// @version      8.13.3
 // @updateURL    https://raw.githubusercontent.com/sitimi-lab/x-list-reader-dist/main/x-list-reader.meta.js
 // @downloadURL  https://raw.githubusercontent.com/sitimi-lab/x-list-reader-dist/main/x-list-reader.user.js
 // @description  X（旧Twitter）で、アカウントごとにリポストを振り分け、「ここまで読んだ」線から古い投稿をグレーアウトします
@@ -19,7 +19,7 @@
   if (window.top !== window.self) return;
   if (window.__xlrLoaded) return;
   window.__xlrLoaded = true;
-  var VERSION = '8.13.2';
+  var VERSION = '8.13.3';
 
   /* ================= 保存領域 ================= */
   var store = {
@@ -278,6 +278,10 @@
     '.xlr-faded > *{opacity:.42 !important;filter:grayscale(.8);}',
     '.xlr-faded2 > *{opacity:.24 !important;filter:grayscale(.9);}',
     '.xlr-line{box-shadow:inset 0 3px 0 0 ' + LINE + ' !important;}',
+    // 内側の影だけでは投稿の白い背景に覆われるため、線を前面にも描く。
+    // 高さを相殺し、Xのセル位置やスクロール距離を変えない。
+    '.xlr-line::before{content:"";display:block;height:0;border-top:3px solid ' + LINE + ';',
+    'margin-bottom:-3px;position:relative;z-index:1;pointer-events:none;flex-shrink:0;}',
     '.xlr-relocated-line{box-shadow:inset 0 3px 0 0 #7856ff !important;}',
     '.xlr-fallback-line{box-shadow:inset 0 3px 0 0 #1d9bf0 !important;}',
     '.xlr-relocated-line::before{content:"既読の境目（基準ポストとは別の位置）";',
@@ -549,10 +553,11 @@
     }
 
     if (id) c.dataset.xlrId = id;
-    return { cell: c, rp: rp, id: id };
+    var context = socialCtx(article);
+    return { cell: c, rp: rp, id: id, pinned: !!(context && PINNED_RE.test(context.textContent || '')) };
   }
 
-  var scanQueued = false, repostReadCache = {}, repostReadCacheMark = null;
+  var scanQueued = false, repostReadCache = {}, repostReadCacheMark = null, repostReadCacheScope = null;
   // 仮想スクロールで確認済みの境目が画面から消えても、同じ投稿が戻ったときに
   // 線の色と位置を保てるようにする。基準やページが変われば捨てる。
   var lineState = { scope: null, mark: null, id: null, mode: '', seen: false };
@@ -565,10 +570,11 @@
   function scan() {
     var list = articles(), n = list.length, i;
     var items = new Array(n), read = new Array(n), above = new Array(n);
-    // 境目を付け替えたら、前の境目で得たリポスト判定は使わない。
-    if (repostReadCacheMark !== markId) {
+    // 境目や適用先を変えたら、前の場所で得たリポスト判定は使わない。
+    if (repostReadCacheMark !== markId || repostReadCacheScope !== scopeKey) {
       repostReadCache = {};
       repostReadCacheMark = markId;
+      repostReadCacheScope = scopeKey;
     }
     if (lineState.scope !== scopeKey || lineState.mark !== markId) {
       lineState = { scope: scopeKey, mark: markId, id: null, mode: '', seen: false };
@@ -603,6 +609,9 @@
       if (cmpId(a.id, b.id) < 0) {
         a.cell.dataset.xlrJumpDip = '1';
         b.cell.dataset.xlrJumpDip = '1';
+        // 古い固定投稿の次に新しい通常投稿があっても、会話内の逆順ではない。
+        // この区別は、通常位置の基準だけをリポストの片側判定に使うために保持する。
+        if (!a.pinned && !b.pinned) { a.conversation = true; b.conversation = true; }
       }
     }
 
@@ -616,32 +625,52 @@
         // 通常の投稿は自分のIDで判断する。表示位置が前後しても投稿時刻は変わらない
         read[i] = atOrOlder(f.id, markId);   // 線を引いたポスト自身も既読側に含める
         // 位置が信用できるものだけを、リポストの判断のよりどころにする。
-        // 線のポスト自身は「上側＝未読側」として扱う
+        // 基準自身がリポストの下側にある場合は、まだ既読側の証拠にはしない。
         if (!f.dip) above[i] = olderThan(f.id, markId);
       }
     }
-    // リポストのIDは元投稿のものなので時系列の基準にできない。前後にある
-    // 「位置が信用できる投稿」の両方が既読側のときだけグレーにする。
-    // 片方でも未読側なら、見落としを避けるためグレーにしない
-    var lo = new Array(n), up = null, dn = null;
+    // リポストのIDは元投稿のものなので時系列の基準にできない。原則は前後の
+    // 信用できる投稿を使い、通常位置の基準が上にあるときだけ片側でも判断する。
+    // 未読側の証拠があれば、見落としを避けるためグレーにしない。
+    var lo = new Array(n), up = null, dn = null, markerPresent = false;
     for (i = n - 1; i >= 0; i--) {
       lo[i] = dn;                                   // 下にある投稿の「線より古いか」
       if (above[i] !== null) dn = above[i];
+      if (items[i] && !items[i].rp && items[i].id === markId) markerPresent = true;
     }
+    var markerAbove = false, markerBlocked = false;
     for (i = 0; i < n; i++) {
+      var current = items[i];
+      if (current && !current.rp) {
+        if (!current.id || current.dip || current.pinned || current.conversation || read[i] !== true) {
+          markerAbove = false;
+          markerBlocked = true;
+        } else if (current.id === markId) {
+          markerAbove = true;
+          markerBlocked = false;
+        }
+      }
       if (above[i] !== null) { up = read[i]; continue; }   // 上にある投稿の既読状態
       if (read[i] !== null) continue;                      // 通常の投稿は自分のIDで判断済み
-      // 仮想スクロールの画面端では、片側の通常ポストがまだ描画されていない。
-      // 片側だけで決めると、同じリポストがスクロール位置によって
-      // グレーになったり戻ったりするため、上下がそろうまで未読として残す。
-      if (up !== null && lo[i] !== null) {
+      var cached = current && current.id ? repostReadCache[current.id] : null;
+      var fromMarker = false;
+      if (up === false || lo[i] === false) {
+        // 保存済みの判定より、新しく確認できた未読側の証拠を優先する。
+        read[i] = false;
+      } else if (up !== null && lo[i] !== null) {
         read[i] = up && lo[i];
-        // 次の描画で片側が仮想スクロールの外へ消えても、同じリポストを
-        // 反対の状態へ戻さない。IDは元投稿のIDだが、同じ投稿の識別には使える。
-        if (items[i] && items[i].id) repostReadCache[items[i].id] = read[i];
-      } else if (items[i] && items[i].id && Object.prototype.hasOwnProperty.call(repostReadCache, items[i].id)) {
-        read[i] = repostReadCache[items[i].id];
+      } else if (current && current.rp && markerAbove) {
+        // 通常位置の基準から下へ続くリポストは、下側の通常投稿が未描画でも既読。
+        // 単に古い投稿が上にある場合や、固定・引き上げ会話ではこの根拠を使わない。
+        read[i] = true;
+        fromMarker = true;
+      } else if (cached) {
+        // 基準が画面から消えただけなら維持する。位置が信用できないと判明した場合や
+        // リポストが基準より上へ移った場合には、片側だけで得た判定を引き継がない。
+        read[i] = cached.read && !(cached.fromMarker && (markerBlocked || (markerPresent && !markerAbove)));
+        fromMarker = cached.fromMarker;
       } else read[i] = false;
+      if (current && current.id) repostReadCache[current.id] = { read: read[i], fromMarker: fromMarker };
     }
 
     // 線は「基準ポスト」ではなく、画面内で確認できた連続既読範囲の先頭に出す。
