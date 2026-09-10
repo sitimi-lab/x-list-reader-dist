@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Xリスト強化 — リポスト振り分け＋既読ライン
 // @namespace    xlr.local
-// @version      8.14.1
+// @version      8.14.2
 // @updateURL    https://raw.githubusercontent.com/sitimi-lab/x-list-reader-dist/main/x-list-reader.meta.js
 // @downloadURL  https://raw.githubusercontent.com/sitimi-lab/x-list-reader-dist/main/x-list-reader.user.js
 // @description  X（旧Twitter）で、アカウントごとにリポストを振り分け、「ここまで読んだ」線から古い投稿をグレーアウトします
@@ -19,7 +19,7 @@
   if (window.top !== window.self) return;
   if (window.__xlrLoaded) return;
   window.__xlrLoaded = true;
-  var VERSION = '8.14.1';
+  var VERSION = '8.14.2';
 
   /* ================= 保存領域 ================= */
   var store = {
@@ -774,7 +774,7 @@
   }
 
   /* ================= Xのバーを隠す ================= */
-  var barCache = null, lastY = 0, barMotion = 0, barsHidden = false, barsRevealed = false;
+  var managedBottomBars = [], lastY = 0, barMotion = 0, barsHidden = false, barsRevealed = false;
   var topCache = [], topDirty = true, topBacks = [];
   var edgeY = -1, edgeMax = -1, edgeSince = 0, lastWheelAt = 0, barTouch = null;
   var BACK_SELECTOR = '[data-testid="app-bar-back"],button[aria-label="戻る"],button[aria-label="Back"],'+
@@ -898,13 +898,16 @@
     return found;
   }
 
-  function bottomBar() {
-    if (barCache && barCache.isConnected) return barCache;
-    barCache = document.querySelector('[data-testid="BottomBar"]');
-    if (barCache) return barCache;
+  function bottomBars() {
+    // Xは空の旧要素を残して表示先を変えるため、接続中の1要素を使い回さない。
+    var found = Array.prototype.filter.call(document.querySelectorAll('[data-testid="BottomBar"]'), function (el) {
+      return !el.closest(BAR_EXCLUDE) && !el.querySelector(BAR_EXCLUDE);
+    });
+    if (found.length) return found;
     var navs = document.querySelectorAll('nav');
     for (var i = 0; i < navs.length; i++) {
       var n = navs[i], cs;
+      if (n.closest(BAR_EXCLUDE) || n.querySelector(BAR_EXCLUDE)) continue;
       try { cs = getComputedStyle(n); } catch (e) { continue; }
       if (cs.position !== 'fixed' && cs.position !== 'sticky') continue;
       var r = n.getBoundingClientRect();
@@ -912,7 +915,17 @@
       if (r.bottom <= window.innerHeight - 12) continue;
       // アイコンが並んでいることを条件に加える（別の固定要素を誤検出しないため）
       if (n.querySelectorAll('a,[role="link"],[role="button"]').length < 3) continue;
-      barCache = n; return n;
+      found.push(n);
+    }
+    return found;
+  }
+
+  function bottomBar(bars) {
+    bars = bars || bottomBars();
+    // 空のプレースホルダーではなく、操作部品のあるバーから移動量を測る。
+    for (var i = 0; i < bars.length; i++) {
+      var h = bars[i].getBoundingClientRect().height;
+      if (h > 20 && h < 130 && bars[i].querySelector('a,button,[role="link"],[role="button"]')) return bars[i];
     }
     return null;
   }
@@ -975,22 +988,28 @@
       el.classList.add('xlr-bar-managed', 'xlr-bar-shown');
       el.classList.toggle('xlr-top-hidden', hide);
     });
-    var bar = bottomBar();
-    if (!bar) { setShift(false); return; }
+    var bars = bottomBars(), bar = bottomBar(bars);
+    // 対象でなくなった要素が別の用途に再利用されても、非表示を残さない。
+    managedBottomBars.forEach(function (el) {
+      if (bars.indexOf(el) === -1) el.classList.remove('xlr-bar-managed', 'xlr-bar-shown', 'xlr-hidebar');
+    });
+    managedBottomBars = bars;
 
     // 高さの測定はクラスを触る前に行う（測定でレイアウトが確定するため、
     // 付け外しを挟むと透明化のアニメーションが毎回やり直しになる）
     var h = 0;
-    try { h = Math.round(bar.getBoundingClientRect().height); } catch (e) {}
+    try { h = bar ? Math.round(bar.getBoundingClientRect().height) : 0; } catch (e) {}
     if (h > 20 && h < 130) document.documentElement.style.setProperty('--xlr-shift', h + 'px');
 
     var wantFade = !barsRevealed && (cfg.bottomBar === 'always' || (cfg.bottomBar === 'scroll' && barsHidden));
     // 下のバーはスマホ幅のときだけ存在する。PCで下げるとボタンが画面外に出てしまう
     // 変化があるときだけ書き換える。毎回付け直すと状態が安定しない
-    bar.classList.toggle('xlr-bar-managed', cfg.bottomBar !== 'off');
-    bar.classList.toggle('xlr-bar-shown', cfg.bottomBar !== 'off' && !wantFade);
-    if (bar.classList.contains('xlr-hidebar') !== wantFade) bar.classList.toggle('xlr-hidebar', wantFade);
-    setShift(mobile && wantFade);
+    bars.forEach(function (el) {
+      el.classList.toggle('xlr-bar-managed', cfg.bottomBar !== 'off');
+      el.classList.toggle('xlr-bar-shown', cfg.bottomBar !== 'off' && !wantFade);
+      if (el.classList.contains('xlr-hidebar') !== wantFade) el.classList.toggle('xlr-hidebar', wantFade);
+    });
+    setShift(mobile && wantFade && !!bar);
   }
 
   /* ================= UI ================= */
