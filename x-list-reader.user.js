@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Xリスト強化 — リポスト振り分け＋既読ライン
 // @namespace    xlr.local
-// @version      8.13.3
+// @version      8.13.4
 // @updateURL    https://raw.githubusercontent.com/sitimi-lab/x-list-reader-dist/main/x-list-reader.meta.js
 // @downloadURL  https://raw.githubusercontent.com/sitimi-lab/x-list-reader-dist/main/x-list-reader.user.js
 // @description  X（旧Twitter）で、アカウントごとにリポストを振り分け、「ここまで読んだ」線から古い投稿をグレーアウトします
@@ -19,7 +19,7 @@
   if (window.top !== window.self) return;
   if (window.__xlrLoaded) return;
   window.__xlrLoaded = true;
-  var VERSION = '8.13.3';
+  var VERSION = '8.13.4';
 
   /* ================= 保存領域 ================= */
   var store = {
@@ -1001,7 +1001,7 @@
   // パネルの外を触ったら「閉じるだけ」にする。
   // リンクの上を触った場合でも、1回目のタップでは移動させない
   document.addEventListener('click', function (e) {
-    if (panel.hidden) return;
+    if (panel.hidden || autoClickDepth > 0) return;
     var t = e.target;
     if (!t || !t.closest) return;
     if (t.closest('#xlr-panel') || t.closest('#xlr-fab') ||
@@ -1262,13 +1262,15 @@
     } catch (e) {}
   }
 
-  var suppressTimer = null;
+  var suppressTimer = null, autoClickDepth = 0;
   function autoClick(el) {
     if (!el) return;
     var at = markHere(), len = 0;
     try { len = history.length; } catch (e) {}
     suppressPush++;
-    try { el.click(); } catch (e) {}
+    // 自動選択を、利用者のパネル外タップとして遮らない。
+    autoClickDepth++;
+    try { el.click(); } catch (e) {} finally { autoClickDepth--; }
     clearTimeout(suppressTimer);
     // Xは押した直後ではなく、読み込みが済んでから履歴を積むことがあるので長めに構える
     suppressTimer = setTimeout(function () { suppressPush = 0; }, 4000);
@@ -1362,29 +1364,33 @@
 
   // 「開いている」メニューの中から、文言が一致する項目を探す
   function findMenuItem(re) {
+    // ラベルに説明文が付いていても、そのラベルを含む操作対象を押す。
+    // dialogなどの入れ物自体にはクリックを送らない。
+    function findLabel(root) {
+      var labels = root.querySelectorAll('div,span,a,button,p');
+      for (var i = 0; i < labels.length; i++) {
+        var el = labels[i];
+        if (el.closest('article,[data-testid="cellInnerDiv"],[role="tablist"],#xlr-panel')) continue;
+        if (el.children.length > 2 || !re.test(normText(el.textContent)) || !visible(el)) continue;
+        var target = el.closest('button,a,[role="button"],[role="menuitem"],[role="menuitemradio"],[role="option"],[role="radio"]');
+        if (target && root.contains(target) && visible(target)) return target;
+        return el;
+      }
+      return null;
+    }
     // まずは役割つきの入れ物（メニュー/一覧/ダイアログ/シート）の中を探す
     var menus = document.querySelectorAll(
       '[role="menu"],[role="listbox"],[role="dialog"],[data-testid="Dropdown"],[data-testid="sheetDialog"],#layers'
     );
-    var m, i;
+    var m, item;
     for (m = 0; m < menus.length; m++) {
-      if (!visible(menus[m])) continue;
-      var items = menus[m].querySelectorAll('[role="menuitem"],[role="option"],[role="radio"],[role="tab"],a,button,[tabindex]');
-      for (i = 0; i < items.length; i++) {
-        if (re.test(normText(items[i].textContent)) && visible(items[i])) return items[i];
-      }
+      // #layersなどは入れ物の高さが0でも、子のシートが表示される。
+      item = findLabel(menus[m]);
+      if (item) return item;
     }
     // 見つからなければ、実機のメニューが想定と違うマークアップの可能性があるため、
     // 画面全体から文言が完全一致する（かつ子要素の少ない＝ラベルらしい）要素を探す保険を掛ける
-    var leaves = document.querySelectorAll('div,span,a,button,p');
-    for (i = 0; i < leaves.length; i++) {
-      var el = leaves[i];
-      if (el.children.length > 2) continue;
-      if (!re.test(normText(el.textContent))) continue;
-      if (!visible(el)) continue;
-      return el.closest('[role],a,button,[tabindex]') || el;
-    }
-    return null;
+    return findLabel(document.body);
   }
 
   // プロフィールの「ポスト」タブは押すと選択肢が開くので、そこから「すべて」を選ぶ
@@ -1392,26 +1398,43 @@
   var POST_RE = /^(ポスト|投稿|Posts)$/;
   var menuTries = 0;
 
+  function profileControls() {
+    var controls = Array.prototype.slice.call(tabEls());
+    // タブとは別に配置された絞り込みボタンにも対応する。
+    var buttons = document.querySelectorAll('[data-testid="primaryColumn"] button,[data-testid="primaryColumn"] [role="button"]');
+    for (var i = 0; i < buttons.length; i++) {
+      if (!buttons[i].closest('article,[data-testid="cellInnerDiv"],[role="tablist"]') &&
+          (POST_RE.test(normText(buttons[i].textContent)) || ALL_RE.test(normText(buttons[i].textContent)))) controls.unshift(buttons[i]);
+    }
+    return controls;
+  }
+
   function pickProfileAllTab() {
-    var ts = tabEls(), i;
+    var ts = profileControls(), i;
     // すでに「すべて」になっていれば何もしない
     for (i = 0; i < ts.length; i++) {
       if (ALL_RE.test(normText(ts[i].textContent))) {
-        if (ts[i].getAttribute('aria-selected') === 'true') return true;
         if (!visible(ts[i])) continue;
+        if (ts[i].getAttribute('aria-selected') === 'true' || ts[i].getAttribute('role') !== 'tab') return true;
         autoClick(ts[i]);
         return true;
       }
     }
     // 選択肢が開いていれば「すべて」を選ぶ
-    var item = findMenuItem(ALL_RE);
+    var item = menuTries > 0 ? findMenuItem(ALL_RE) : null;
     if (item) { autoClick(item); return true; }
     // まだなら「ポスト」タブを押して選択肢を開く（開く操作は1回だけ）
     if (menuTries === 0) {
       for (i = 0; i < ts.length; i++) {
         if (!POST_RE.test(normText(ts[i].textContent)) || !visible(ts[i])) continue;
         menuTries = 1;
-        autoClick(ts[i]);
+        // 選択用の矢印ボタンが内側にある場合、親タブを押しても開かない。
+        var buttons = ts[i].querySelectorAll('button,[role="button"],[aria-haspopup]');
+        var trigger = ts[i];
+        for (var b = 0; b < buttons.length; b++) {
+          if (visible(buttons[b])) { trigger = buttons[b]; break; }
+        }
+        autoClick(trigger);
         return false;
       }
       return false;
