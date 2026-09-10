@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Xリスト強化 — リポスト振り分け＋既読ライン
 // @namespace    xlr.local
-// @version      8.13.1
+// @version      8.13.2
 // @updateURL    https://raw.githubusercontent.com/sitimi-lab/x-list-reader-dist/main/x-list-reader.meta.js
 // @downloadURL  https://raw.githubusercontent.com/sitimi-lab/x-list-reader-dist/main/x-list-reader.user.js
 // @description  X（旧Twitter）で、アカウントごとにリポストを振り分け、「ここまで読んだ」線から古い投稿をグレーアウトします
@@ -19,7 +19,7 @@
   if (window.top !== window.self) return;
   if (window.__xlrLoaded) return;
   window.__xlrLoaded = true;
-  var VERSION = '8.13.1';
+  var VERSION = '8.13.2';
 
   /* ================= 保存領域 ================= */
   var store = {
@@ -381,7 +381,16 @@
     return c ? c.querySelector('[data-testid="socialContext"]') : null;
   }
   function cellOf(a) { return a.closest('[data-testid="cellInnerDiv"]') || a.parentElement; }
-  function articles() { return document.querySelectorAll('article[data-testid="tweet"]'); }
+  function articles() {
+    // 仮想スクロールは上のセルをDOMの末尾へ再追加することがある。
+    // 既読判定と移動先には、DOMへの追加順ではなくセルの表示順を使う。
+    // 座標は比較のたびに読み直さず、一度だけ取得する。
+    return Array.prototype.map.call(document.querySelectorAll('article[data-testid="tweet"]'), function (a, i) {
+      return { article: a, top: cellOf(a).getBoundingClientRect().top, index: i };
+    }).sort(function (a, b) {
+      return a.top - b.top || a.index - b.index;
+    }).map(function (row) { return row.article; });
+  }
   function actionBar(a) { return a.querySelector('[role="group"]') || a; }
 
   function isRepost(article) {
@@ -671,15 +680,18 @@
       if (jumping) jumpSawMarker = true;
     }
     // 未読の直後から末尾までがすべて既読で、その先頭に置ける通常投稿を探す。
-    if (markId && cfg.readStyle !== 'hide' && lastUnread >= 0) {
+    if (markId && cfg.readStyle !== 'hide') {
       for (i = lastUnread + 1; i < n; i++) {
-        if (exactMarkerBoundary(items[i]) || reliableBoundary(items[i])) { boundaryAt = i; break; }
+        // 未読側が未描画でも、基準ポスト自身とその下を確認できれば線を出せる。
+        // 基準がない場合の代替線は、従来どおり未読側の証拠も必要。
+        if (exactMarkerBoundary(items[i]) || (lastUnread >= 0 && reliableBoundary(items[i]))) { boundaryAt = i; break; }
       }
       if (boundaryAt >= 0 && visibleReadTail(boundaryAt) && tailHasEvidence(boundaryAt)) {
         if (items[boundaryAt].id === markId) boundaryMode = 'orange';
         // 基準ポストが画面内に確認できる場合だけ紫にする。
         // 見つからない場合は、保存IDをはさむ証拠があるときだけ青（欠落）にする。
-        else if (markerHere || (jumping && jumpSawMarker)) boundaryMode = 'purple';
+        else if (markerHere || (jumping && jumpSawMarker) ||
+                 (lineState.mode === 'purple' && lineState.id === items[boundaryAt].id)) boundaryMode = 'purple';
         else {
           // 基準IDをはさむ通常投稿が両側にあるときだけ、削除・欠落として青線を出す。
           var upper = null;
