@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Xリスト強化 — リポスト振り分け＋既読ライン
 // @namespace    xlr.local
-// @version      8.14.0
+// @version      8.14.1
 // @updateURL    https://raw.githubusercontent.com/sitimi-lab/x-list-reader-dist/main/x-list-reader.meta.js
 // @downloadURL  https://raw.githubusercontent.com/sitimi-lab/x-list-reader-dist/main/x-list-reader.user.js
 // @description  X（旧Twitter）で、アカウントごとにリポストを振り分け、「ここまで読んだ」線から古い投稿をグレーアウトします
@@ -19,7 +19,7 @@
   if (window.top !== window.self) return;
   if (window.__xlrLoaded) return;
   window.__xlrLoaded = true;
-  var VERSION = '8.14.0';
+  var VERSION = '8.14.1';
 
   /* ================= 保存領域 ================= */
   var store = {
@@ -856,6 +856,13 @@
     if (!topDirty) return topCache;
     topDirty = false;
     var found = [];
+    // モバイル版の上部は主列・バナーの外（#layers）に置かれる。
+    // TopNavBar自身は固定配置とは限らないため、明示された識別子を先に確認する。
+    document.querySelectorAll('[data-testid="TopNavBar"]').forEach(function (el) {
+      if (el.closest(BAR_EXCLUDE) || el.querySelector(BAR_EXCLUDE)) return;
+      var r = el.getBoundingClientRect();
+      if (r.width >= window.innerWidth * 0.7 && r.height >= 20 && r.height <= 180) found.push(el);
+    });
     // 主列・バナー内の意味が分かる部品を起点に、小さい固定領域だけを探す。
     var roots = document.querySelectorAll('[data-testid="primaryColumn"],header[role="banner"],[role="banner"]');
     for (var i = 0; i < roots.length; i++) {
@@ -863,7 +870,8 @@
       var seeds = root.querySelectorAll('h1,h2,[role="heading"],[role="tablist"],'+
         '[data-testid="SideNav_AccountSwitcher_Button"],' + BACK_SELECTOR);
       for (var j = 0; j < seeds.length; j++) {
-        if (seeds[j].closest(BAR_EXCLUDE)) continue;
+        // 識別済みの上部から親へ探索を広げ、隣のレイヤーまで隠さない。
+        if (seeds[j].closest(BAR_EXCLUDE + ',[data-testid="TopNavBar"]')) continue;
         for (var n = seeds[j]; n && root.contains(n); n = n.parentElement) {
           var cs = getComputedStyle(n), r = n.getBoundingClientRect(), top = parseFloat(cs.top);
           if ((cs.position === 'sticky' || cs.position === 'fixed') && top >= 0 && top <= 60 &&
