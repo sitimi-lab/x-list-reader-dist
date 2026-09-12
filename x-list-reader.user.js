@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Xリスト強化 — リポスト振り分け＋既読ライン
 // @namespace    xlr.local
-// @version      8.14.2
+// @version      8.14.3
 // @updateURL    https://raw.githubusercontent.com/sitimi-lab/x-list-reader-dist/main/x-list-reader.meta.js
 // @downloadURL  https://raw.githubusercontent.com/sitimi-lab/x-list-reader-dist/main/x-list-reader.user.js
 // @description  X（旧Twitter）で、アカウントごとにリポストを振り分け、「ここまで読んだ」線から古い投稿をグレーアウトします
@@ -19,7 +19,7 @@
   if (window.top !== window.self) return;
   if (window.__xlrLoaded) return;
   window.__xlrLoaded = true;
-  var VERSION = '8.14.2';
+  var VERSION = '8.14.3';
 
   /* ================= 保存領域 ================= */
   var store = {
@@ -276,6 +276,11 @@
   var FONT = '-apple-system,BlinkMacSystemFont,"Hiragino Sans","Hiragino Kaku Gothic ProN","Yu Gothic UI","Helvetica Neue",Arial,sans-serif';
 
   var CSS = [
+    // 提供HTMLのスペース専用部品と配置で限定し、タブ列や参加ダイアログは隠さない。
+    // CSSで判定するため、後から追加・交換されたバーにもそのまま適用される。
+    '@media (max-width:700px){',
+    '#layers [role="grid"]:not(article *,[role="dialog"],[role="dialog"] *):has(> div > nav [data-testid="ScrollSnap-List"] button [data-testid="pill-contents-container"]){display:none !important;}',
+    '}',
     '.xlr-off{display:none !important;}',
     /* セル自体ではなく中身を薄くする。こうすると境目の線が薄まらない */
     '.xlr-faded > *{opacity:.42 !important;filter:grayscale(.8);}',
