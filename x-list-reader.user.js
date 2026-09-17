@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Xリスト強化 — リポスト振り分け＋既読ライン
 // @namespace    xlr.local
-// @version      8.14.3
+// @version      8.14.4
 // @updateURL    https://raw.githubusercontent.com/sitimi-lab/x-list-reader-dist/main/x-list-reader.meta.js
 // @downloadURL  https://raw.githubusercontent.com/sitimi-lab/x-list-reader-dist/main/x-list-reader.user.js
 // @description  X（旧Twitter）で、アカウントごとにリポストを振り分け、「ここまで読んだ」線から古い投稿をグレーアウトします
@@ -19,7 +19,7 @@
   if (window.top !== window.self) return;
   if (window.__xlrLoaded) return;
   window.__xlrLoaded = true;
-  var VERSION = '8.14.3';
+  var VERSION = '8.14.4';
 
   /* ================= 保存領域 ================= */
   var store = {
@@ -613,12 +613,18 @@
       while (end < normals.length - 1 &&
              cmpId(items[normals[end]].id, items[normals[end + 1]].id) < 0) end++;
       var after = end < normals.length - 1 ? items[normals[end + 1]].id : null;
-      if (after !== null && cmpId(after, cu) < 0) continue;
       var pv = i > 0 ? items[normals[i - 1]].id : null;
+      if (after !== null && cmpId(after, cu) < 0) {
+        // 通常位置にある別の既読会話は、先頭だけを代わりの境目候補に残す。
+        // 直前より新しい投稿は返信なので除外し、基準を含む会話をまとめる移動もしない。
+        items[normals[i]].readConversationHead = (pv === null || cmpId(pv, cu) > 0) &&
+          !!markId && cmpId(items[normals[end]].id, markId) < 0;
+        continue;
+      }
       if (pv === null || cmpId(pv, cu) > 0) items[normals[i]].dip = true;
     }
-    // 会話は古い順に並んだまとまりごと上へ引き上げられる。線を置ける場所は従来どおり
-    // 会話の末尾に残す一方、「境目へ移動」の代わりの目印には会話全体を使わない。
+    // 探索方向を判断する目印からは会話全体を除外する。
+    // 線の確定時は、通常位置の別の既読会話の先頭と返信を区別する。
     for (i = 0; i < normals.length - 1; i++) {
       var a = items[normals[i]], b = items[normals[i + 1]];
       if (cmpId(a.id, b.id) < 0) {
@@ -707,9 +713,10 @@
       return false;
     }
     function reliableBoundary(it) {
-      // xlrJumpDip は「境目へ移動」で会話返信を避けるための印であり、
-      // 返信だけを基準ポストの代わりにしないため、代替の境目候補からは外す。
-      return !!(it && !it.rp && it.id && !it.dip && it.cell.dataset.xlrJumpDip !== '1');
+      // 探索用の印だけでは通常位置の会話先頭まで除外してしまう。
+      // 返信と引き上げ会話を除き、別の既読会話の先頭は候補に含める。
+      return !!(it && !it.rp && it.id && !it.dip &&
+        (it.cell.dataset.xlrJumpDip !== '1' || it.readConversationHead));
     }
     function exactMarkerBoundary(it) {
       // 保存した基準ポスト自身は、下がすべて既読なら会話中でもオレンジの境目にできる。
