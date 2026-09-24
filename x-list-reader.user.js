@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Xリスト強化 — リポスト振り分け＋既読ライン
 // @namespace    xlr.local
-// @version      8.14.4
+// @version      8.14.5
 // @updateURL    https://raw.githubusercontent.com/sitimi-lab/x-list-reader-dist/main/x-list-reader.meta.js
 // @downloadURL  https://raw.githubusercontent.com/sitimi-lab/x-list-reader-dist/main/x-list-reader.user.js
 // @description  X（旧Twitter）で、アカウントごとにリポストを振り分け、「ここまで読んだ」線から古い投稿をグレーアウトします
@@ -19,7 +19,7 @@
   if (window.top !== window.self) return;
   if (window.__xlrLoaded) return;
   window.__xlrLoaded = true;
-  var VERSION = '8.14.4';
+  var VERSION = '8.14.5';
 
   /* ================= 保存領域 ================= */
   var store = {
@@ -653,7 +653,8 @@
     // リポストのIDは元投稿のものなので時系列の基準にできない。原則は前後の
     // 信用できる投稿を使い、通常位置の基準が上にあるときだけ片側でも判断する。
     // 未読側の証拠があれば、見落としを避けるためグレーにしない。
-    var lo = new Array(n), up = null, dn = null, markerPresent = false;
+    // pending: 下側の根拠がまだ描画されていないだけで判定できないリポスト。未読扱いは変えない。
+    var lo = new Array(n), pending = new Array(n), up = null, dn = null, markerPresent = false;
     for (i = n - 1; i >= 0; i--) {
       lo[i] = dn;                                   // 下にある投稿の「線より古いか」
       if (above[i] !== null) dn = above[i];
@@ -690,17 +691,22 @@
         // リポストが基準より上へ移った場合には、片側だけで得た判定を引き継がない。
         read[i] = cached.read && !(cached.fromMarker && (markerBlocked || (markerPresent && !markerAbove)));
         fromMarker = cached.fromMarker;
-      } else read[i] = false;
-      if (current && current.id) repostReadCache[current.id] = { read: read[i], fromMarker: fromMarker };
+        pending[i] = !read[i] && !!cached.pending && lo[i] === null;
+      } else {
+        read[i] = false;
+        // 未読側の証拠ではなく、描画末尾で下側の投稿が未描画なだけの状態を区別する。
+        pending[i] = lo[i] === null;
+      }
+      if (current && current.id) repostReadCache[current.id] = { read: read[i], fromMarker: fromMarker, pending: !!pending[i] };
     }
 
     // 線は「基準ポスト」ではなく、画面内で確認できた連続既読範囲の先頭に出す。
     // そのため、線より下に未読・判定不能の投稿を残さない。
     var markerHere = false, lastUnread = -1, boundaryAt = -1, boundaryMode = '';
-    function visibleReadTail(from) {
+    function visibleReadTail(from, allowPending) {
       for (var j = from; j < n; j++) {
         if (!items[j] || items[j].cell.classList.contains('xlr-off')) continue;
-        if (read[j] !== true) return false;
+        if (read[j] !== true && !(allowPending && pending[j])) return false;
       }
       return true;
     }
@@ -758,8 +764,9 @@
       lineState.mode = boundaryMode;
     } else if (lineState.id && cfg.readStyle !== 'hide') {
       // 確認済みの線が画面内に戻ったときだけ表示を復元する。下に未読が見つかれば破棄する。
+      // 描画末尾で判定待ちのリポストだけでは、確定済みの線を消さない（線の点滅を防ぐ）。
       for (i = 0; i < n; i++) if (items[i] && items[i].id === lineState.id) break;
-      if (i < n && visibleReadTail(i)) { boundaryAt = i; boundaryMode = lineState.mode; }
+      if (i < n && visibleReadTail(i, true)) { boundaryAt = i; boundaryMode = lineState.mode; }
       else if (i < n) { lineState.id = null; lineState.mode = ''; }
     }
 
