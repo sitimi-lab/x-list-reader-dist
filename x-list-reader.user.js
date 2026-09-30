@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Xリスト強化 — リポスト振り分け＋既読ライン
 // @namespace    xlr.local
-// @version      8.14.5
+// @version      8.15.0
 // @updateURL    https://raw.githubusercontent.com/sitimi-lab/x-list-reader-dist/main/x-list-reader.meta.js
 // @downloadURL  https://raw.githubusercontent.com/sitimi-lab/x-list-reader-dist/main/x-list-reader.user.js
 // @description  X（旧Twitter）で、アカウントごとにリポストを振り分け、「ここまで読んだ」線から古い投稿をグレーアウトします
@@ -19,7 +19,7 @@
   if (window.top !== window.self) return;
   if (window.__xlrLoaded) return;
   window.__xlrLoaded = true;
-  var VERSION = '8.14.5';
+  var VERSION = '8.15.0';
 
   /* ================= 保存領域 ================= */
   var store = {
@@ -311,7 +311,7 @@
     /* 下のバーが消えたぶん、右下の投稿ボタンと左下の起動ボタンを下げる */
     /* transform を使うとXのホバー演出と取り合いになって震えるので translate を使う */
     '.xlr-shiftdown{translate:0 var(--xlr-shift,53px) !important;}',
-    '#xlr-fab,#xlr-panel,.xlr-shiftdown{transition:translate .15s ease;}',
+    '#xlr-fab,#xlr-panel,#xlr-toast,.xlr-shiftdown{transition:translate .15s ease;}',
     '.xlr-faded,.xlr-faded2{-webkit-tap-highlight-color:transparent;}',
     '.xlr-chip,.xlr-mark{-webkit-tap-highlight-color:transparent;-webkit-appearance:none;',
     'font-family:' + FONT + ' !important;font-style:normal !important;letter-spacing:0;}',
@@ -362,6 +362,7 @@
     '.xlr-btns button{flex:1 1 auto;background:#1d9bf0;color:#fff;border:0;border-radius:999px;',
     'font-size:11px;padding:5px 8px;cursor:pointer;white-space:nowrap;-webkit-appearance:none;}',
     '.xlr-btns button.sub{background:#2a343d;color:#c8d1d9;}',
+    '.xlr-btns button:disabled{opacity:.45;cursor:default;}',
     '.xlr-primary{display:block;width:100%;margin-top:7px;background:' + LINE + ';color:#fff;',
     'border:0;border-radius:999px;font-size:13px;font-weight:700;padding:9px 8px;cursor:pointer;',
     '-webkit-appearance:none;-webkit-tap-highlight-color:transparent;font-family:' + FONT + ';',
@@ -370,6 +371,16 @@
     '.xlr-add{display:flex;gap:4px;align-items:center;margin-top:3px;}',
     '.xlr-add button{background:#2a343d;color:#c8d1d9;border:0;border-radius:999px;font-size:11px;',
     'padding:4px 8px;cursor:pointer;-webkit-appearance:none;flex:0 0 auto;}',
+    '#xlr-toast{position:fixed;left:12px;z-index:2147483001;max-width:calc(100vw - 24px);box-sizing:border-box;',
+    'bottom:calc(126px + env(safe-area-inset-bottom,0px));display:flex;align-items:center;gap:10px;',
+    'padding:8px 8px 8px 14px;border:1px solid #38444d;border-radius:999px;background:rgba(20,26,33,.98);',
+    'color:#e7e9ea;font-size:13px;line-height:1.3;box-shadow:0 6px 20px rgba(0,0,0,.5);font-family:' + FONT + ';}',
+    '#xlr-toast[hidden]{display:none !important;}',
+    '#xlr-toast button{flex:0 0 auto;background:' + LINE + ';color:#fff;border:0;border-radius:999px;',
+    'font-size:13px;font-weight:700;padding:7px 14px;cursor:pointer;-webkit-appearance:none;',
+    '-webkit-tap-highlight-color:transparent;font-family:' + FONT + ';}',
+    '@media (min-width:701px){#xlr-toast{bottom:70px;}}',
+    '#xlr-markhist{display:none;}',
     '#xlr-undo{display:none;width:100%;margin-top:4px;background:#536471;color:#fff;border:0;',
     'border-radius:999px;font-size:11px;padding:5px 8px;cursor:pointer;-webkit-appearance:none;}'
   ].join('');
@@ -526,10 +537,70 @@
     if (mk) {
       e.preventDefault(); e.stopPropagation();
       var id = mk.dataset.xlrTweet;
-      markId = (markId === id) ? null : id;
-      saveMark(); scheduleScan();
+      changeMark((markId === id) ? null : id, true);
     }
   }, true);
+
+  /* ================= 既読の基準の「元に戻す／やり直す」 ================= */
+  // 誤タップ対策。直前の1回だけを、変更したページでのみ使える。保存・同期はしない
+  var markHist = null;   // { scope, before, after, undone }
+  var toast = null, toastTimer = null;
+
+  function changeMark(id, withToast) {
+    if (id === markId) return;
+    markHist = { scope: scopeKey, before: markId, after: id, undone: false };
+    markId = id;
+    saveMark(); scheduleScan(); renderMarkHist();
+    if (withToast && panel.hidden) showToast(id ? '既読位置を変更しました' : '既読の線を解除しました', 'undo');
+    else hideToast();
+  }
+  // 同期などで基準が履歴と違う値に変わっていたら、その履歴は使わない
+  function canUndoMark() {
+    return !!(markHist && !markHist.undone && markHist.scope === scopeKey && markId === markHist.after);
+  }
+  function canRedoMark() {
+    return !!(markHist && markHist.undone && markHist.scope === scopeKey && markId === markHist.before);
+  }
+  function undoMark() {
+    if (!canUndoMark()) { renderMarkHist(); hideToast(); return; }
+    markId = markHist.before; markHist.undone = true;
+    saveMark(); scheduleScan(); renderMarkHist();
+    if (panel.hidden) showToast('元に戻しました', 'redo'); else hideToast();
+  }
+  function redoMark() {
+    if (!canRedoMark()) { renderMarkHist(); hideToast(); return; }
+    markId = markHist.after; markHist.undone = false;
+    saveMark(); scheduleScan(); renderMarkHist();
+    if (panel.hidden) showToast(markId ? '既読位置を変更しました' : '既読の線を解除しました', 'undo'); else hideToast();
+  }
+
+  function showToast(msg, act) {
+    if (!toast) {
+      toast = document.createElement('div');
+      toast.id = 'xlr-toast'; toast.setAttribute('role', 'status');
+      toast.innerHTML = '<span></span><button type="button"></button>';
+      toast.addEventListener('click', function (e) {
+        var b = e.target.closest && e.target.closest('button');
+        if (!b) return;
+        e.preventDefault(); e.stopPropagation();
+        if (b.dataset.xlrAct === 'redo') redoMark(); else undoMark();
+      });
+    }
+    if (fab.classList.contains('xlr-shiftdown')) toast.classList.add('xlr-shiftdown');
+    else toast.classList.remove('xlr-shiftdown');
+    if (!toast.isConnected) document.body.appendChild(toast);
+    toast.querySelector('span').textContent = msg;
+    var b = toast.querySelector('button');
+    b.textContent = act === 'redo' ? 'やり直す' : '元に戻す';
+    b.dataset.xlrAct = act;
+    toast.hidden = false;
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(hideToast, 6000);
+  }
+  function hideToast() {
+    clearTimeout(toastTimer);
+    if (toast) toast.hidden = true;
+  }
 
   /* ================= 適用 ================= */
   function fadeClass() { return cfg.readStyle === 'dim2' ? 'xlr-faded2' : 'xlr-faded'; }
@@ -990,7 +1061,7 @@
   }
 
   function setShift(on) {
-    var els = [fab, panel, composeButton()];
+    var els = [fab, panel, toast, composeButton()];
     for (var i = 0; i < els.length; i++) {
       if (!els[i]) continue;
       if (on) els[i].classList.add('xlr-shiftdown');
@@ -1067,6 +1138,10 @@
       '<div class="xlr-btns">' +
         '<button id="xlr-here">今の位置を境目に</button>' +
         '<button id="xlr-clear" class="sub">線を解除</button>' +
+      '</div>' +
+      '<div class="xlr-btns" id="xlr-markhist">' +
+        '<button id="xlr-mark-undo" class="sub">既読位置を元に戻す</button>' +
+        '<button id="xlr-mark-redo" class="sub">やり直す</button>' +
       '</div>' +
     '</div>' +
     '<div class="xlr-sec">' +
@@ -1168,14 +1243,25 @@
     syncJumpBtn();
     renderSync();
     renderRules();
+    renderMarkHist();
   }
 
   function updateStat(readCount, unreadCount) {
     var el = panel.querySelector('#xlr-stat');
     if (!el) return;
+    renderMarkHist();
     if (!active) { el.textContent = 'このページでは無効です'; syncJumpBtn(); return; }
     if (!markId) { el.textContent = '境目は未設定です'; syncJumpBtn(); return; }
     el.textContent = '未読 ' + (unreadCount || 0) + '件 / 既読 ' + (readCount || 0) + '件（表示中）';
+  }
+
+  function renderMarkHist() {
+    var w = panel.querySelector('#xlr-markhist');
+    if (!w) return;
+    var u = canUndoMark(), r = canRedoMark();
+    w.style.display = (u || r) ? 'flex' : 'none';
+    panel.querySelector('#xlr-mark-undo').disabled = !u;
+    panel.querySelector('#xlr-mark-redo').disabled = !r;
   }
 
   function syncJumpBtn() {
@@ -1189,7 +1275,7 @@
     if (panel.hidden || autoClickDepth > 0) return;
     var t = e.target;
     if (!t || !t.closest) return;
-    if (t.closest('#xlr-panel') || t.closest('#xlr-fab') ||
+    if (t.closest('#xlr-panel') || t.closest('#xlr-fab') || t.closest('#xlr-toast') ||
         t.closest('.xlr-chip') || t.closest('.xlr-mark')) return;
     panel.hidden = true; cfg.open = false; saveCfg();
     e.preventDefault();
@@ -1201,7 +1287,7 @@
     cfg.open = panel.hidden;
     panel.hidden = !panel.hidden;
     saveCfg();
-    if (!panel.hidden) { syncPanel(); scan(); }
+    if (!panel.hidden) { hideToast(); syncPanel(); scan(); }   // パネル内にも同じボタンがあるので通知は閉じる
   });
 
   function addManual(r) {
@@ -1261,11 +1347,13 @@
         if (l[i].getBoundingClientRect().bottom < 60) continue;
         best = c.dataset.xlrId; break;
       }
-      if (best) { markId = best; saveMark(); scheduleScan(); }
+      if (best) changeMark(best, false);
       return;
     }
+    if (t.id === 'xlr-mark-undo') { undoMark(); return; }
+    if (t.id === 'xlr-mark-redo') { redoMark(); return; }
     if (t.id === 'xlr-jump') { jumpToLine(); return; }
-    if (t.id === 'xlr-clear') { markId = null; saveMark(); scheduleScan(); }
+    if (t.id === 'xlr-clear') changeMark(null, false);
   });
 
   panel.addEventListener('change', function (e) {
@@ -1708,7 +1796,7 @@
     lastPath = sc.path;
     isList = sc.list;
     active = isList || cfg.manualPages.indexOf(sc.path) !== -1;
-    if (sc.key !== scopeKey) { scopeKey = sc.key; loadMark(scopeKey); }
+    if (sc.key !== scopeKey) { scopeKey = sc.key; loadMark(scopeKey); hideToast(); }
     syncPanel(); scheduleScan();
   }
 
